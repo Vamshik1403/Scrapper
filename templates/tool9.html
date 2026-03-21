@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Email Personaliser — GarageLeadsPro{% endblock %}
+{% block topbar_title %}Tool 9 — Email Personaliser{% endblock %}
+{% block topbar_badge %}Outreach{% endblock %}
+
+{% block content %}
+<div class="card animate-in">
+    <div class="card-header">
+        <h2><span class="tool-num">9</span> Email Personaliser</h2>
+        <div class="btn-group">
+            <button class="btn btn-green" id="btn-run-t9" onclick="runTool('tool9')">Run Email Personaliser</button>
+            {% if emails_data %}
+            <a class="btn btn-csv" href="/download/tool9/csv">CSV</a>
+            <a class="btn btn-excel" href="/download/tool9/excel">Excel</a>
+            {% endif %}
+        </div>
+    </div>
+    <div class="status-bar" id="status-tool9"></div>
+    {% if emails_data %}
+    <div class="summary">
+        <span class="badge badge-purple">{{ emails_data|length }} emails generated</span>
+    </div>
+    <div class="search-box"><input type="text" placeholder="Search emails..." onkeyup="searchTable(this, 'emails-table')"></div>
+    <div class="table-wrap">
+        <table id="emails-table">
+            <thead><tr><th>#</th><th>Business Name</th><th>Owner</th><th>Subject</th><th>Custom Opener</th><th>Full Email</th></tr></thead>
+            <tbody>{% for row in emails_data %}<tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ row.business_name or '---' }}</td>
+                <td>{{ row.owner_name or '---' }}</td>
+                <td>{{ row.email_subject or '---' }}</td>
+                <td style="max-width:350px;white-space:normal;color:#86efac;">{{ row.custom_opener or '---' }}</td>
+                <td><button class="btn btn-ghost" style="font-size:11px;" onclick="showEmail(this.getAttribute('data-email'))" data-email="{{ row.full_email|e }}">View</button></td>
+            </tr>{% endfor %}</tbody>
+        </table>
+    </div>
+    {% else %}
+    <div class="empty-state">No email data yet. Run Tool 8 first, then click "Run Email Personaliser".</div>
+    {% endif %}
+</div>
+{% endblock %}
