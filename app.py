@@ -84,6 +84,9 @@ if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "connect_args": {"sslmode": "require"}
+    }
 else:
     # Local development fallback — SQLite
     DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "users.db")
