@@ -77,9 +77,19 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 # ---------------------------------------------------------------------------
 # Database & Auth Setup
 # ---------------------------------------------------------------------------
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "users.db")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH}"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+if DATABASE_URL:
+    # Render provides postgres:// but SQLAlchemy 2.x requires postgresql://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+else:
+    # Local development fallback — SQLite
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "users.db")
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH}"
+
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
