@@ -98,6 +98,11 @@ else:
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
+
+def _db_ctx():
+    """Return app context only if not already inside one (avoids teardown bugs)."""
+    return nullcontext() if has_app_context() else app.app_context()
+
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message_category = "info"
@@ -324,10 +329,6 @@ os.makedirs(AUDITS_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 # CSV ↔ Database helpers (persist tool data across container restarts)
 # ---------------------------------------------------------------------------
-def _db_ctx():
-    """Return app context only if not already inside one (avoids teardown bugs)."""
-    return nullcontext() if has_app_context() else app.app_context()
-
 _CSV_KEY_MAP = {
     RAW_CSV: "step1_raw",
     SCORED_CSV: "step2_scored",
