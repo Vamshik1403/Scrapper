@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import time
@@ -78,6 +79,7 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 # Database & Auth Setup
 # ---------------------------------------------------------------------------
 DATABASE_URL = os.environ.get("DATABASE_URL")
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "users.db")
 
 if DATABASE_URL:
     # Render provides postgres:// but SQLAlchemy 2.x requires postgresql://
@@ -89,7 +91,6 @@ if DATABASE_URL:
     }
 else:
     # Local development fallback — SQLite
-    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance", "users.db")
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH}"
 
@@ -137,6 +138,24 @@ class AppSetting(db.Model):
     __tablename__ = "app_settings"
     key = db.Column(db.String(100), primary_key=True)
     value = db.Column(db.Text, nullable=False, default="")
+
+
+class ToolResult(db.Model):
+    """Stores tool CSV output in the database so data survives container restarts."""
+    __tablename__ = "tool_results"
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(50), unique=True, nullable=False)
+    csv_data = db.Column(db.Text, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AuditFile(db.Model):
+    """Stores generated PDF audit files in the database."""
+    __tablename__ = "audit_files"
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(255), unique=True, nullable=False)
+    pdf_data = db.Column(db.LargeBinary, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
 @login_manager.user_loader
@@ -300,6 +319,95 @@ AUDITS_DIR = os.path.join(BASE_DIR, "audits")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(AUDITS_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# CSV ↔ Database helpers (persist tool data across container restarts)
+# ---------------------------------------------------------------------------
+_CSV_KEY_MAP = {
+    RAW_CSV: "step1_raw",
+    SCORED_CSV: "step2_scored",
+    ADS_CSV: "step3_ads_checked",
+    WEBSITE_CSV: "step4_website_checked",
+    HOT_CSV: "HOT_prospects",
+    WARM_CSV: "WARM_prospects",
+    CONTACTS_CSV: "step5_contacts",
+    GBP_CSV: "step6_gbp",
+    COMPETITOR_CSV: "step7_competitor",
+    CALCULATED_CSV: "step8_calculated",
+    EMAILS_CSV: "step9_emails",
+    BEST_LEADS_CSV: "best_leads",
+    IMPORTED_CSV: "imported_leads",
+}
+
+
+def _save_csv(path, df):
+    """Save DataFrame to database (primary) and file (best-effort)."""
+    # 1. Write to DB first — this is the durable store
+    key = _CSV_KEY_MAP.get(path)
+    if key:
+        try:
+            csv_text = df.to_csv(index=False)
+            row = ToolResult.query.filter_by(key=key).first()
+            if row:
+                row.csv_data = csv_text
+                row.updated_at = datetime.utcnow()
+            else:
+                db.session.add(ToolResult(key=key, csv_data=csv_text))
+            db.session.commit()
+            logger.info("DB save OK  ✓  key=%s  rows=%d", key, len(df))
+        except Exception as e:
+            db.session.rollback()
+            logger.error("DB save FAILED for %s: %s", key, e)
+    # 2. Also write to filesystem (convenience for local dev)
+    try:
+        df.to_csv(path, index=False)
+    except Exception:
+        pass  # ephemeral disk — not critical
+
+
+def _load_df(path):
+    """Load a DataFrame: try DATABASE first, fall back to file."""
+    key = _CSV_KEY_MAP.get(path)
+    if key:
+        try:
+            row = ToolResult.query.filter_by(key=key).first()
+            if row:
+                logger.info("DB load OK  ✓  key=%s", key)
+                return pd.read_csv(io.StringIO(row.csv_data))
+        except Exception as e:
+            logger.warning("DB load failed for %s: %s", key, e)
+    # Fallback: filesystem (local dev or DB not populated yet)
+    if os.path.exists(path):
+        return pd.read_csv(path)
+    return None
+
+
+def _csv_exists(path):
+    """Check if CSV data exists — DATABASE first, then file."""
+    key = _CSV_KEY_MAP.get(path)
+    if key:
+        try:
+            if ToolResult.query.filter_by(key=key).first() is not None:
+                return True
+        except Exception:
+            pass
+    return os.path.exists(path)
+
+
+def _save_audit_pdf(filename, pdf_bytes):
+    """Save a generated PDF to database."""
+    try:
+        row = AuditFile.query.filter_by(filename=filename).first()
+        if row:
+            row.pdf_data = pdf_bytes
+        else:
+            db.session.add(AuditFile(filename=filename, pdf_data=pdf_bytes))
+        db.session.commit()
+        logger.info("DB audit save OK  ✓  %s", filename)
+    except Exception as e:
+        db.session.rollback()
+        logger.error("DB save FAILED for audit %s: %s", filename, e)
+
 
 # Track background job status
 job_status = {
@@ -561,7 +669,7 @@ def run_tool1():
             all_results.extend(scrape_city(city, service))
             time.sleep(3)
         df = pd.DataFrame(all_results)
-        df.to_csv(RAW_CSV, index=False)
+        _save_csv(RAW_CSV, df)
         job_status["tool1"] = "done"
         job_status["tool1_msg"] = f"Done. Found {len(df)} companies." + get_serpapi_warning()
     except Exception as e:
@@ -588,11 +696,11 @@ def run_tool2():
     try:
         job_status["tool2"] = "running"
         job_status["tool2_msg"] = "Scoring in progress..."
-        df = pd.read_csv(RAW_CSV)
+        df = _load_df(RAW_CSV)
         scores = df["review_count"].apply(score_reviews)
         df["review_score"] = scores.apply(lambda x: x[0])
         df["prospect_label"] = scores.apply(lambda x: x[1])
-        df.to_csv(SCORED_CSV, index=False)
+        _save_csv(SCORED_CSV, df)
         hot = int((df["prospect_label"] == "HOT").sum())
         warm = int((df["prospect_label"] == "WARM").sum())
         cold = int((df["prospect_label"] == "COLD").sum())
@@ -620,7 +728,7 @@ def run_tool3():
         job_status["tool3"] = "running"
         mode_label = " (Smart Mode)" if smart_mode else ""
         job_status["tool3_msg"] = f"Checking ads{mode_label}... this may take a few minutes."
-        df = pd.read_csv(SCORED_CSV)
+        df = _load_df(SCORED_CSV)
 
         ads_running_list = []
         ads_count_list = []
@@ -671,7 +779,7 @@ def run_tool3():
         df["ads_running"] = ads_running_list
         df["ads_count"] = ads_count_list
         df["prospect_label"] = updated_labels
-        df.to_csv(ADS_CSV, index=False)
+        _save_csv(ADS_CSV, df)
 
         hot_no_ads = int(((df["prospect_label"] == "HOT") & (df["ads_running"] == "NO")).sum())
         job_status["tool3"] = "done"
@@ -759,7 +867,7 @@ def run_tool4():
     try:
         job_status["tool4"] = "running"
         job_status["tool4_msg"] = "Checking websites... this may take a few minutes."
-        df = pd.read_csv(ADS_CSV)
+        df = _load_df(ADS_CSV)
         total = len(df)
         rows = []
 
@@ -770,7 +878,7 @@ def run_tool4():
 
         results_df = pd.DataFrame(rows)
         df = pd.concat([df, results_df], axis=1)
-        df.to_csv(WEBSITE_CSV, index=False)
+        _save_csv(WEBSITE_CSV, df)
 
         hot_df = df[df["prospect_label"] == "HOT"]
         warm_df = df[df["prospect_label"] == "WARM"]
@@ -783,14 +891,14 @@ def run_tool4():
                 (warm_df["review_count"].fillna(0).astype(int) < 120)
             ]
             priority_df = pd.concat([hot_df, promising_warm], ignore_index=True)
-            priority_df.to_csv(HOT_CSV, index=False)
+            _save_csv(HOT_CSV, priority_df)
             remaining_warm = warm_df[~warm_df.index.isin(promising_warm.index)]
-            remaining_warm.to_csv(WARM_CSV, index=False)
+            _save_csv(WARM_CSV, remaining_warm)
         else:
-            hot_df.to_csv(HOT_CSV, index=False)
-            warm_df.to_csv(WARM_CSV, index=False)
+            _save_csv(HOT_CSV, hot_df)
+            _save_csv(WARM_CSV, warm_df)
 
-        processed_count = len(pd.read_csv(HOT_CSV)) if os.path.exists(HOT_CSV) else len(hot_df)
+        processed_count = len(hot_df) if not smart_mode else len(priority_df)
 
         bad = int((df["website_quality"] == "BAD").sum())
         basic = int((df["website_quality"] == "BASIC").sum())
@@ -974,7 +1082,7 @@ def run_tool5():
     try:
         job_status["tool5"] = "running"
         job_status["tool5_msg"] = "Finding contacts..."
-        df = pd.read_csv(HOT_CSV)
+        df = _load_df(HOT_CSV)
         total = len(df)
 
         owners, emails, phones, statuses, sources = [], [], [], [], []
@@ -996,7 +1104,7 @@ def run_tool5():
         df["email_source"] = sources
         df["email_status"] = statuses
         df["direct_phone"] = phones
-        df.to_csv(CONTACTS_CSV, index=False)
+        _save_csv(CONTACTS_CSV, df)
 
         owner_found = int((df["owner_name"] != "Team").sum())
         email_found = int(df["personal_email"].notna().sum())
@@ -1088,7 +1196,7 @@ def run_tool6():
     try:
         job_status["tool6"] = "running"
         job_status["tool6_msg"] = "Analysing Google profiles..."
-        df = pd.read_csv(CONTACTS_CSV)
+        df = _load_df(CONTACTS_CSV)
         total = len(df)
         rows = []
         fail_count = 0
@@ -1103,7 +1211,7 @@ def run_tool6():
 
         results_df = pd.DataFrame(rows)
         df = pd.concat([df, results_df], axis=1)
-        df.to_csv(GBP_CSV, index=False)
+        _save_csv(GBP_CSV, df)
 
         avg = round(df["gbp_score"].mean(), 1)
         poor = int((df["gbp_label"] == "POOR").sum())
@@ -1127,7 +1235,7 @@ def run_tool7():
     try:
         job_status["tool7"] = "running"
         job_status["tool7_msg"] = "Analysing competitors..."
-        df = pd.read_csv(GBP_CSV)
+        df = _load_df(GBP_CSV)
         total = len(df)
         rows = []
         fail_count = 0
@@ -1212,7 +1320,7 @@ def run_tool7():
 
         results_df = pd.DataFrame(rows)
         df = pd.concat([df, results_df], axis=1)
-        df.to_csv(COMPETITOR_CSV, index=False)
+        _save_csv(COMPETITOR_CSV, df)
 
         avg_gap = round(df["competitive_gap_score"].mean(), 1)
         low = int((df["urgency"] == "LOW").sum())
@@ -1237,7 +1345,7 @@ def run_tool8():
     try:
         job_status["tool8"] = "running"
         job_status["tool8_msg"] = "Calculating value metrics..."
-        df = pd.read_csv(COMPETITOR_CSV)
+        df = _load_df(COMPETITOR_CSV)
         roi_multiples = []
         monthly_values = []
         value_sentences = []
@@ -1282,7 +1390,7 @@ def run_tool8():
             df["competitor_1_name"] = df["top1_name"]
             df["competitor_1_reviews"] = df["top1_reviews"]
 
-        df.to_csv(CALCULATED_CSV, index=False)
+        _save_csv(CALCULATED_CSV, df)
 
         avg_roi = round(sum(roi_multiples) / len(roi_multiples), 1) if roi_multiples else 0
         high_roi = sum(1 for r in roi_multiples if r >= 30)
@@ -1302,7 +1410,7 @@ def run_tool9():
     try:
         job_status["tool9"] = "running"
         job_status["tool9_msg"] = "Generating personalised emails..."
-        df = pd.read_csv(CALCULATED_CSV)
+        df = _load_df(CALCULATED_CSV)
         total = len(df)
         rows = []
         ai_fail_count = 0
@@ -1388,7 +1496,7 @@ Pravin
             time.sleep(1)
 
         result_df = pd.DataFrame(rows)
-        result_df.to_csv(EMAILS_CSV, index=False)
+        _save_csv(EMAILS_CSV, result_df)
 
         job_status["tool9"] = "done"
         msg = f"Done. Generated {len(result_df)} personalised emails."
@@ -1407,7 +1515,7 @@ def run_tool10():
     try:
         job_status["tool10"] = "running"
         job_status["tool10_msg"] = "Generating PDF audits..."
-        df = pd.read_csv(EMAILS_CSV)
+        df = _load_df(EMAILS_CSV)
         total = len(df)
         styles = getSampleStyleSheet()
         generated = []
@@ -1466,7 +1574,14 @@ def run_tool10():
             ))
 
             doc.build(content)
-            generated.append({"business_name": business, "pdf_file": f"{safe_name}_Audit.pdf"})
+            # Also save PDF to database for persistence
+            pdf_filename = f"{safe_name}_Audit.pdf"
+            try:
+                with open(os.path.join(AUDITS_DIR, pdf_filename), "rb") as pf:
+                    _save_audit_pdf(pdf_filename, pf.read())
+            except Exception:
+                pass
+            generated.append({"business_name": business, "pdf_file": pdf_filename})
             job_status["tool10_msg"] = f"Generated {idx + 1}/{total} PDFs..."
 
         job_status["tool10"] = "done"
@@ -1481,8 +1596,8 @@ def run_tool10():
 
 def _load_csv(path):
     """Load a CSV file as list of dicts, or None if it doesn't exist."""
-    if os.path.exists(path):
-        df = pd.read_csv(path)
+    df = _load_df(path)
+    if df is not None:
         for col in df.columns:
             if pd.api.types.is_numeric_dtype(df[col]):
                 df[col] = df[col].fillna(0)
@@ -1500,11 +1615,20 @@ def _load_cities_str():
 
 
 def _load_audit_files():
+    files = []
     if os.path.exists(AUDITS_DIR):
         files = [f for f in os.listdir(AUDITS_DIR) if f.endswith(".pdf")]
-        files.sort()
-        return files
-    return []
+    # Also check database for audit files not on disk
+    try:
+        db_audits = AuditFile.query.all()
+        db_names = {a.filename for a in db_audits}
+        disk_names = set(files)
+        for name in db_names - disk_names:
+            files.append(name)
+    except Exception:
+        pass
+    files.sort()
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -1924,12 +2048,15 @@ def run_pipeline():
 
     # Build summary
     summary_parts = []
-    if os.path.exists(RAW_CSV):
-        summary_parts.append(f"Companies: {len(pd.read_csv(RAW_CSV))}")
-    if os.path.exists(HOT_CSV):
-        summary_parts.append(f"HOT: {len(pd.read_csv(HOT_CSV))}")
-    if os.path.exists(EMAILS_CSV):
-        summary_parts.append(f"Emails: {len(pd.read_csv(EMAILS_CSV))}")
+    if _csv_exists(RAW_CSV):
+        _df = _load_df(RAW_CSV)
+        summary_parts.append(f"Companies: {len(_df)}")
+    if _csv_exists(HOT_CSV):
+        _df = _load_df(HOT_CSV)
+        summary_parts.append(f"HOT: {len(_df)}")
+    if _csv_exists(EMAILS_CSV):
+        _df = _load_df(EMAILS_CSV)
+        summary_parts.append(f"Emails: {len(_df)}")
     if os.path.exists(AUDITS_DIR):
         pdfs = [f for f in os.listdir(AUDITS_DIR) if f.endswith(".pdf")]
         summary_parts.append(f"PDFs: {len(pdfs)}")
@@ -1957,6 +2084,13 @@ def clear_output():
             if f.endswith(".pdf") and os.path.isfile(fp):
                 os.remove(fp)
                 pdf_removed += 1
+    # Also clear from database
+    try:
+        ToolResult.query.delete()
+        AuditFile.query.delete()
+        db.session.commit()
+    except Exception as e:
+        logger.warning("DB clear failed: %s", e)
     return jsonify({"status": "ok", "msg": f"Removed {removed} data files + {pdf_removed} PDFs."})
 
 
@@ -1976,7 +2110,7 @@ def start_tool1():
 def start_tool2():
     if job_status["tool2"] == "running":
         return jsonify({"status": "running", "msg": "Tool 2 is already running."})
-    if not os.path.exists(RAW_CSV):
+    if not _csv_exists(RAW_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 1 first — no raw data found."})
     thread = threading.Thread(target=run_tool2)
     thread.start()
@@ -1988,7 +2122,7 @@ def start_tool2():
 def start_tool3():
     if job_status["tool3"] == "running":
         return jsonify({"status": "running", "msg": "Tool 3 is already running."})
-    if not os.path.exists(SCORED_CSV):
+    if not _csv_exists(SCORED_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 2 first — no scored data found."})
     thread = threading.Thread(target=run_tool3)
     thread.start()
@@ -2000,7 +2134,7 @@ def start_tool3():
 def start_tool4():
     if job_status["tool4"] == "running":
         return jsonify({"status": "running", "msg": "Tool 4 is already running."})
-    if not os.path.exists(ADS_CSV):
+    if not _csv_exists(ADS_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 3 first — no ads data found."})
     thread = threading.Thread(target=run_tool4)
     thread.start()
@@ -2012,7 +2146,7 @@ def start_tool4():
 def start_tool5():
     if job_status["tool5"] == "running":
         return jsonify({"status": "running", "msg": "Tool 5 is already running."})
-    if not os.path.exists(HOT_CSV):
+    if not _csv_exists(HOT_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 4 first — no HOT prospects found."})
     thread = threading.Thread(target=run_tool5)
     thread.start()
@@ -2024,7 +2158,7 @@ def start_tool5():
 def start_tool6():
     if job_status["tool6"] == "running":
         return jsonify({"status": "running", "msg": "Tool 6 is already running."})
-    if not os.path.exists(CONTACTS_CSV):
+    if not _csv_exists(CONTACTS_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 5 first — no contacts data found."})
     thread = threading.Thread(target=run_tool6)
     thread.start()
@@ -2036,7 +2170,7 @@ def start_tool6():
 def start_tool7():
     if job_status["tool7"] == "running":
         return jsonify({"status": "running", "msg": "Tool 7 is already running."})
-    if not os.path.exists(GBP_CSV):
+    if not _csv_exists(GBP_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 6 first — no GBP data found."})
     thread = threading.Thread(target=run_tool7)
     thread.start()
@@ -2048,7 +2182,7 @@ def start_tool7():
 def start_tool8():
     if job_status["tool8"] == "running":
         return jsonify({"status": "running", "msg": "Tool 8 is already running."})
-    if not os.path.exists(COMPETITOR_CSV):
+    if not _csv_exists(COMPETITOR_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 7 first — no competitor data found."})
     thread = threading.Thread(target=run_tool8)
     thread.start()
@@ -2060,7 +2194,7 @@ def start_tool8():
 def start_tool9():
     if job_status["tool9"] == "running":
         return jsonify({"status": "running", "msg": "Tool 9 is already running."})
-    if not os.path.exists(CALCULATED_CSV):
+    if not _csv_exists(CALCULATED_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 8 first — no calculated data found."})
     thread = threading.Thread(target=run_tool9)
     thread.start()
@@ -2072,7 +2206,7 @@ def start_tool9():
 def start_tool10():
     if job_status["tool10"] == "running":
         return jsonify({"status": "running", "msg": "Tool 10 is already running."})
-    if not os.path.exists(EMAILS_CSV):
+    if not _csv_exists(EMAILS_CSV):
         return jsonify({"status": "error", "msg": "Run Tool 9 first — no emails data found."})
     thread = threading.Thread(target=run_tool10)
     thread.start()
@@ -2082,10 +2216,24 @@ def start_tool10():
 @app.route("/download/audit/<filename>")
 @login_required
 def download_audit(filename):
-    filepath = os.path.join(AUDITS_DIR, filename)
-    if not os.path.exists(filepath):
-        return "File not found.", 404
-    return send_file(filepath, as_attachment=True, download_name=filename)
+    # Sanitize filename
+    safe_name = secure_filename(filename)
+    filepath = os.path.join(AUDITS_DIR, safe_name)
+    if os.path.exists(filepath):
+        return send_file(filepath, as_attachment=True, download_name=safe_name)
+    # Fall back to database
+    try:
+        row = AuditFile.query.filter_by(filename=safe_name).first()
+        if row:
+            return send_file(
+                io.BytesIO(row.pdf_data),
+                as_attachment=True,
+                download_name=safe_name,
+                mimetype="application/pdf",
+            )
+    except Exception:
+        pass
+    return "File not found.", 404
 
 
 @app.route("/status")
@@ -2169,8 +2317,8 @@ def kpi():
         "cities": {},
     }
     try:
-        if os.path.exists(RAW_CSV):
-            df = pd.read_csv(RAW_CSV)
+        df = _load_df(RAW_CSV)
+        if df is not None:
             data["total_leads"] = len(df)
             for _, row in df.iterrows():
                 c = str(row.get("city", "Unknown"))
@@ -2178,23 +2326,23 @@ def kpi():
     except Exception:
         pass
     try:
-        if os.path.exists(SCORED_CSV):
-            df = pd.read_csv(SCORED_CSV)
+        df = _load_df(SCORED_CSV)
+        if df is not None:
             data["hot_count"] = int((df["prospect_label"] == "HOT").sum())
             data["warm_count"] = int((df["prospect_label"] == "WARM").sum())
             data["cold_count"] = int((df["prospect_label"] == "COLD").sum())
     except Exception:
         pass
     try:
-        if os.path.exists(ADS_CSV):
-            df = pd.read_csv(ADS_CSV)
+        df = _load_df(ADS_CSV)
+        if df is not None:
             data["ads_yes"] = int((df["ads_running"] == "YES").sum())
             data["ads_no"] = int((df["ads_running"] == "NO").sum())
     except Exception:
         pass
     try:
-        if os.path.exists(WEBSITE_CSV):
-            df = pd.read_csv(WEBSITE_CSV)
+        df = _load_df(WEBSITE_CSV)
+        if df is not None:
             data["bad_sites"] = int((df["website_quality"] == "BAD").sum())
             data["basic_sites"] = int((df["website_quality"] == "BASIC").sum())
             data["good_sites"] = int((df["website_quality"] == "GOOD").sum())
@@ -2202,8 +2350,8 @@ def kpi():
     except Exception:
         pass
     try:
-        if os.path.exists(GBP_CSV):
-            df = pd.read_csv(GBP_CSV)
+        df = _load_df(GBP_CSV)
+        if df is not None:
             data["gbp_poor"] = int((df["gbp_label"] == "POOR").sum())
             data["gbp_average"] = int((df["gbp_label"] == "AVERAGE").sum())
             data["gbp_strong"] = int((df["gbp_label"] == "STRONG").sum())
@@ -2211,8 +2359,8 @@ def kpi():
     except Exception:
         pass
     try:
-        if os.path.exists(COMPETITOR_CSV):
-            df = pd.read_csv(COMPETITOR_CSV)
+        df = _load_df(COMPETITOR_CSV)
+        if df is not None:
             data["urgency_low"] = int((df["urgency"] == "LOW").sum())
             data["urgency_medium"] = int((df["urgency"] == "MEDIUM").sum())
             data["urgency_high"] = int((df["urgency"] == "HIGH").sum())
@@ -2220,20 +2368,20 @@ def kpi():
     except Exception:
         pass
     try:
-        if os.path.exists(CALCULATED_CSV):
-            df = pd.read_csv(CALCULATED_CSV)
+        df = _load_df(CALCULATED_CSV)
+        if df is not None:
             data["avg_roi"] = round(df["roi_multiple"].mean(), 1) if len(df) else 0
             data["high_roi_count"] = int((df["roi_multiple"] >= 30).sum())
     except Exception:
         pass
     try:
-        if os.path.exists(EMAILS_CSV):
-            data["emails_ready"] = len(pd.read_csv(EMAILS_CSV))
+        df = _load_df(EMAILS_CSV)
+        if df is not None:
+            data["emails_ready"] = len(df)
     except Exception:
         pass
     try:
-        if os.path.exists(AUDITS_DIR):
-            data["pdfs_ready"] = len([f for f in os.listdir(AUDITS_DIR) if f.endswith(".pdf")])
+        data["pdfs_ready"] = len(_load_audit_files())
     except Exception:
         pass
     return jsonify(data)
@@ -2258,10 +2406,10 @@ def download_filtered():
     }
 
     csv_path = tool_csv_map.get(tool)
-    if not csv_path or not os.path.exists(csv_path):
+    if not csv_path or not _csv_exists(csv_path):
         return "Source data not found. Run the tool first.", 404
 
-    df = pd.read_csv(csv_path)
+    df = _load_df(csv_path)
 
     # Apply filter based on tool + filter_type
     if tool == "tool2":
@@ -2344,9 +2492,8 @@ def download_filtered():
         return "No results match that filter.", 404
 
     filename = f"{tool}_{filter_type}.csv"
-    out_path = os.path.join(OUTPUT_DIR, filename)
-    df.to_csv(out_path, index=False)
-    return send_file(out_path, as_attachment=True, download_name=filename)
+    buf = io.BytesIO(df.to_csv(index=False).encode("utf-8"))
+    return send_file(buf, as_attachment=True, download_name=filename, mimetype="text/csv")
 
 
 @app.route("/download_smart")
@@ -2362,13 +2509,13 @@ def download_smart():
     # Find the most complete CSV (furthest tool that has been run)
     source = None
     for path in [CALCULATED_CSV, COMPETITOR_CSV, GBP_CSV, CONTACTS_CSV, WEBSITE_CSV, ADS_CSV, SCORED_CSV]:
-        if os.path.exists(path):
+        if _csv_exists(path):
             source = path
             break
     if not source:
         return "No data found. Run the pipeline first.", 404
 
-    df = pd.read_csv(source)
+    df = _load_df(source)
 
     if label and "prospect_label" in df.columns:
         df = df[df["prospect_label"] == label]
@@ -2385,19 +2532,18 @@ def download_smart():
         return "No results match those filters.", 404
 
     filename = "smart_export.csv"
-    out_path = os.path.join(OUTPUT_DIR, filename)
-    df.to_csv(out_path, index=False)
-    return send_file(out_path, as_attachment=True, download_name=filename)
+    buf = io.BytesIO(df.to_csv(index=False).encode("utf-8"))
+    return send_file(buf, as_attachment=True, download_name=filename, mimetype="text/csv")
 
 
 @app.route("/best_leads")
 @login_required
 def best_leads():
     """Generate Best Leads using dynamic toggle filters."""
-    if not os.path.exists(CALCULATED_CSV):
+    if not _csv_exists(CALCULATED_CSV):
         return jsonify({"status": "error", "msg": "No data found. Run through Tool 8 first.", "count": 0})
 
-    df = pd.read_csv(CALCULATED_CSV)
+    df = _load_df(CALCULATED_CSV)
 
     # Read toggle params ("1" = enabled, default all on)
     use_hot = request.args.get("hot", "1") == "1"
@@ -2421,12 +2567,13 @@ def best_leads():
         mask &= df["competitive_gap_score"] >= 7
 
     filtered = df[mask]
-    filtered.to_csv(BEST_LEADS_CSV, index=False)
+    _save_csv(BEST_LEADS_CSV, filtered)
 
     if download:
         if len(filtered) == 0:
             return "No best leads found with current filters.", 404
-        return send_file(BEST_LEADS_CSV, as_attachment=True, download_name="best_leads.csv")
+        buf = io.BytesIO(filtered.to_csv(index=False).encode("utf-8"))
+        return send_file(buf, as_attachment=True, download_name="best_leads.csv", mimetype="text/csv")
 
     # Return JSON preview (top 20)
     preview = filtered.head(20).to_dict(orient="records")
@@ -2472,16 +2619,20 @@ def download(tool, fmt):
     else:
         return "Invalid tool", 404
 
-    if not os.path.exists(csv_path):
+    if not _csv_exists(csv_path):
         return "File not found. Run the tool first.", 404
 
     if fmt == "csv":
-        return send_file(csv_path, as_attachment=True, download_name=f"{basename}.csv")
+        df = _load_df(csv_path)
+        buf = io.BytesIO(df.to_csv(index=False).encode("utf-8"))
+        return send_file(buf, as_attachment=True, download_name=f"{basename}.csv", mimetype="text/csv")
     elif fmt == "excel":
-        excel_path = os.path.join(OUTPUT_DIR, f"{basename}.xlsx")
-        df = pd.read_csv(csv_path)
-        df.to_excel(excel_path, index=False)
-        return send_file(excel_path, as_attachment=True, download_name=f"{basename}.xlsx")
+        df = _load_df(csv_path)
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False)
+        buf.seek(0)
+        return send_file(buf, as_attachment=True, download_name=f"{basename}.xlsx",
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
         return "Invalid format. Use csv or excel.", 400
 
@@ -2808,7 +2959,7 @@ def import_process():
     df = _classify_imported(df, use_ai=use_ai)
 
     # Save
-    df.to_csv(IMPORTED_CSV, index=False)
+    _save_csv(IMPORTED_CSV, df)
 
     # Clean up temp
     if os.path.exists(temp_path):
@@ -2832,29 +2983,39 @@ def import_clear():
     for f in [IMPORTED_CSV, os.path.join(OUTPUT_DIR, "_import_temp.csv")]:
         if os.path.exists(f):
             os.remove(f)
+    # Also clear from database
+    try:
+        ToolResult.query.filter_by(key="imported_leads").delete()
+        db.session.commit()
+    except Exception:
+        pass
     return jsonify({"status": "ok", "msg": "Imported leads cleared."})
 
 
 @app.route("/download/imported/<fmt>")
 @login_required
 def download_imported(fmt):
-    if not os.path.exists(IMPORTED_CSV):
+    if not _csv_exists(IMPORTED_CSV):
         return "No imported data found. Upload and process first.", 404
+    df = _load_df(IMPORTED_CSV)
     if fmt == "csv":
-        return send_file(IMPORTED_CSV, as_attachment=True, download_name="imported_leads.csv")
+        buf = io.BytesIO(df.to_csv(index=False).encode("utf-8"))
+        return send_file(buf, as_attachment=True, download_name="imported_leads.csv", mimetype="text/csv")
     elif fmt == "excel":
-        excel_path = os.path.join(OUTPUT_DIR, "imported_leads.xlsx")
-        pd.read_csv(IMPORTED_CSV).to_excel(excel_path, index=False)
-        return send_file(excel_path, as_attachment=True, download_name="imported_leads.xlsx")
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False)
+        buf.seek(0)
+        return send_file(buf, as_attachment=True, download_name="imported_leads.xlsx",
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     return "Invalid format.", 400
 
 
 @app.route("/download/imported/filtered/<label>")
 @login_required
 def download_imported_filtered(label):
-    if not os.path.exists(IMPORTED_CSV):
+    if not _csv_exists(IMPORTED_CSV):
         return "No imported data found.", 404
-    df = pd.read_csv(IMPORTED_CSV)
+    df = _load_df(IMPORTED_CSV)
     label_upper = label.upper()
     if label_upper not in ("HOT", "WARM", "COLD"):
         return "Invalid label. Use hot, warm, or cold.", 400
@@ -2862,9 +3023,8 @@ def download_imported_filtered(label):
     if len(df) == 0:
         return f"No {label_upper} leads found.", 404
     filename = f"imported_{label_upper}.csv"
-    out_path = os.path.join(OUTPUT_DIR, filename)
-    df.to_csv(out_path, index=False)
-    return send_file(out_path, as_attachment=True, download_name=filename)
+    buf = io.BytesIO(df.to_csv(index=False).encode("utf-8"))
+    return send_file(buf, as_attachment=True, download_name=filename, mimetype="text/csv")
 
 
 # ---------------------------------------------------------------------------
