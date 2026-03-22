@@ -347,13 +347,14 @@ def _save_csv(path, df):
     if key:
         try:
             csv_text = df.to_csv(index=False)
-            row = ToolResult.query.filter_by(key=key).first()
-            if row:
-                row.csv_data = csv_text
-                row.updated_at = datetime.utcnow()
-            else:
-                db.session.add(ToolResult(key=key, csv_data=csv_text))
-            db.session.commit()
+            with app.app_context():
+                row = ToolResult.query.filter_by(key=key).first()
+                if row:
+                    row.csv_data = csv_text
+                    row.updated_at = datetime.utcnow()
+                else:
+                    db.session.add(ToolResult(key=key, csv_data=csv_text))
+                db.session.commit()
             logger.info("DB save OK  ✓  key=%s  rows=%d", key, len(df))
         except Exception as e:
             db.session.rollback()
@@ -370,7 +371,8 @@ def _load_df(path):
     key = _CSV_KEY_MAP.get(path)
     if key:
         try:
-            row = ToolResult.query.filter_by(key=key).first()
+            with app.app_context():
+                row = ToolResult.query.filter_by(key=key).first()
             if row:
                 logger.info("DB load OK  ✓  key=%s", key)
                 return pd.read_csv(io.StringIO(row.csv_data))
@@ -387,8 +389,9 @@ def _csv_exists(path):
     key = _CSV_KEY_MAP.get(path)
     if key:
         try:
-            if ToolResult.query.filter_by(key=key).first() is not None:
-                return True
+            with app.app_context():
+                if ToolResult.query.filter_by(key=key).first() is not None:
+                    return True
         except Exception:
             pass
     return os.path.exists(path)
@@ -397,12 +400,13 @@ def _csv_exists(path):
 def _save_audit_pdf(filename, pdf_bytes):
     """Save a generated PDF to database."""
     try:
-        row = AuditFile.query.filter_by(filename=filename).first()
-        if row:
-            row.pdf_data = pdf_bytes
-        else:
-            db.session.add(AuditFile(filename=filename, pdf_data=pdf_bytes))
-        db.session.commit()
+        with app.app_context():
+            row = AuditFile.query.filter_by(filename=filename).first()
+            if row:
+                row.pdf_data = pdf_bytes
+            else:
+                db.session.add(AuditFile(filename=filename, pdf_data=pdf_bytes))
+            db.session.commit()
         logger.info("DB audit save OK  ✓  %s", filename)
     except Exception as e:
         db.session.rollback()
