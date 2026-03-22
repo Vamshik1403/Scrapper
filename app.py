@@ -7,6 +7,7 @@ import hashlib
 import logging
 import threading
 import smtplib
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from functools import wraps
 from urllib.parse import urlparse, urljoin
@@ -15,7 +16,7 @@ import dns.resolver
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from flask import Flask, render_template, jsonify, send_file, request, redirect, url_for, flash
+from flask import Flask, has_app_context, render_template, jsonify, send_file, request, redirect, url_for, flash
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_sqlalchemy import SQLAlchemy
 from flask_limiter import Limiter
@@ -225,14 +226,14 @@ _init_db()
 # ---------------------------------------------------------------------------
 def _get_setting(key, default=""):
     """Read a setting from DB. Returns default if not found."""
-    with app.app_context():
+    with _db_ctx():
         row = db.session.get(AppSetting, key)
         return row.value if row else default
 
 
 def _set_setting(key, value):
     """Write a setting to DB (upsert)."""
-    with app.app_context():
+    with _db_ctx():
         row = db.session.get(AppSetting, key)
         if row:
             row.value = value
@@ -323,6 +324,10 @@ os.makedirs(AUDITS_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 # CSV ↔ Database helpers (persist tool data across container restarts)
 # ---------------------------------------------------------------------------
+def _db_ctx():
+    """Return app context only if not already inside one (avoids teardown bugs)."""
+    return nullcontext() if has_app_context() else app.app_context()
+
 _CSV_KEY_MAP = {
     RAW_CSV: "step1_raw",
     SCORED_CSV: "step2_scored",
@@ -347,7 +352,7 @@ def _save_csv(path, df):
     if key:
         try:
             csv_text = df.to_csv(index=False)
-            with app.app_context():
+            with _db_ctx():
                 row = ToolResult.query.filter_by(key=key).first()
                 if row:
                     row.csv_data = csv_text
@@ -371,11 +376,11 @@ def _load_df(path):
     key = _CSV_KEY_MAP.get(path)
     if key:
         try:
-            with app.app_context():
+            with _db_ctx():
                 row = ToolResult.query.filter_by(key=key).first()
-            if row:
-                logger.info("DB load OK  ✓  key=%s", key)
-                return pd.read_csv(io.StringIO(row.csv_data))
+                if row:
+                    logger.info("DB load OK  ✓  key=%s", key)
+                    return pd.read_csv(io.StringIO(row.csv_data))
         except Exception as e:
             logger.warning("DB load failed for %s: %s", key, e)
     # Fallback: filesystem (local dev or DB not populated yet)
@@ -389,7 +394,7 @@ def _csv_exists(path):
     key = _CSV_KEY_MAP.get(path)
     if key:
         try:
-            with app.app_context():
+            with _db_ctx():
                 if ToolResult.query.filter_by(key=key).first() is not None:
                     return True
         except Exception:
@@ -400,7 +405,7 @@ def _csv_exists(path):
 def _save_audit_pdf(filename, pdf_bytes):
     """Save a generated PDF to database."""
     try:
-        with app.app_context():
+        with _db_ctx():
             row = AuditFile.query.filter_by(filename=filename).first()
             if row:
                 row.pdf_data = pdf_bytes
@@ -424,7 +429,13 @@ job_status = {
 active_service_type = "garage door repair"
 
 # Smart Mode: when enabled, API-heavy tools only process HOT + promising WARM leads
-smart_mode = False
+def _is_smart_mode():
+    """Read smart_mode from DB (survives restarts + shared across workers)."""
+    return _get_setting("smart_mode", "0") == "1"
+
+def _set_smart_mode(enabled):
+    """Write smart_mode to DB."""
+    _set_setting("smart_mode", "1" if enabled else "0")
 
 # ---------------------------------------------------------------------------
 # API Usage Tracking, Caching & Key Rotation
@@ -730,7 +741,7 @@ def get_domain(url):
 def run_tool3():
     try:
         job_status["tool3"] = "running"
-        mode_label = " (Smart Mode)" if smart_mode else ""
+        mode_label = " (Smart Mode)" if _is_smart_mode() else ""
         job_status["tool3_msg"] = f"Checking ads{mode_label}... this may take a few minutes."
         df = _load_df(SCORED_CSV)
 
@@ -748,7 +759,7 @@ def run_tool3():
             ads_count = 0
 
             # Smart Mode: skip COLD leads to save API credits
-            if smart_mode and label == "COLD":
+            if _is_smart_mode() and label == "COLD":
                 ads_running = "SKIPPED"
                 skipped += 1
             elif pd.notna(website):
@@ -889,7 +900,7 @@ def run_tool4():
 
         # Smart Mode: include promising WARM leads (bad/basic website, < 120 reviews)
         # in the HOT pipeline so Tools 5-10 also process them
-        if smart_mode:
+        if _is_smart_mode():
             promising_warm = warm_df[
                 (warm_df["website_quality"].isin(["BAD", "BASIC"])) |
                 (warm_df["review_count"].fillna(0).astype(int) < 120)
@@ -902,14 +913,14 @@ def run_tool4():
             _save_csv(HOT_CSV, hot_df)
             _save_csv(WARM_CSV, warm_df)
 
-        processed_count = len(hot_df) if not smart_mode else len(priority_df)
+        processed_count = len(hot_df) if not _is_smart_mode() else len(priority_df)
 
         bad = int((df["website_quality"] == "BAD").sum())
         basic = int((df["website_quality"] == "BASIC").sum())
         good = int((df["website_quality"] == "GOOD").sum())
         job_status["tool4"] = "done"
         msg = f"Done. BAD: {bad} | BASIC: {basic} | GOOD: {good} | "
-        if smart_mode:
+        if _is_smart_mode():
             msg += f"Priority leads (HOT+WARM): {processed_count}"
         else:
             msg += f"HOT: {len(hot_df)} | WARM: {len(warm_df)}"
@@ -1689,7 +1700,7 @@ def list_users():
         "settings.html", active_page="settings",
         current_cities=_load_cities_str(),
         active_service=active_service_type,
-        smart_mode=smart_mode,
+        smart_mode=_is_smart_mode(),
         users=users, show_users=True,
     )
 
@@ -1818,6 +1829,7 @@ def index():
         competitor_data=competitor_data, calculated_data=calculated_data,
         emails_data=emails_data, best_leads_data=best_leads_data,
         audit_files=audit_files, chart_data=chart_data,
+        smart_mode=_is_smart_mode(),
     )
 
 
@@ -1888,7 +1900,7 @@ def page_settings():
         "settings.html", active_page="settings",
         current_cities=_load_cities_str(),
         active_service=active_service_type,
-        smart_mode=smart_mode,
+        smart_mode=_is_smart_mode(),
     )
 
 
@@ -1916,10 +1928,10 @@ def save_service():
 @app.route("/save_smart_mode", methods=["POST"])
 @login_required
 def save_smart_mode():
-    global smart_mode
     data = request.get_json()
-    smart_mode = data.get("enabled", False)
-    label = "ON" if smart_mode else "OFF"
+    enabled = data.get("enabled", False)
+    _set_smart_mode(enabled)
+    label = "ON" if enabled else "OFF"
     return jsonify({"status": "ok", "msg": f"Smart Mode: {label}"})
 
 
@@ -2245,7 +2257,7 @@ def download_audit(filename):
 def status():
     data = dict(job_status)
     remaining = SERPAPI_MONTHLY_LIMIT - api_usage["serpapi_calls"]
-    data["smart_mode"] = smart_mode
+    data["smart_mode"] = _is_smart_mode()
     data["api_usage"] = {
         "serpapi_calls": api_usage["serpapi_calls"],
         "serpapi_remaining": remaining,
