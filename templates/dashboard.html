@@ -241,7 +241,7 @@
         countEl.classList.remove('show'); dlBtn.style.display = 'none';
         msgEl.style.display = 'none'; tableWrap.style.display = 'none'; empty.style.display = 'none';
         fetch('/best_leads?' + getBLParams())
-        .then(function(r){ return r.json(); })
+        .then(function(r){ if (!r.ok) throw new Error('Server returned ' + r.status); return r.json(); })
         .then(function(data) {
             loading.classList.remove('show'); btn.disabled = false;
             if (data.status === 'error') {
@@ -272,9 +272,9 @@
                 msgEl.style.display = 'block'; msgEl.style.background = 'rgba(34,197,94,0.1)';
                 msgEl.style.color = '#86efac'; msgEl.style.border = '1px solid rgba(34,197,94,0.3)';
             }
-        }).catch(function() {
+        }).catch(function(err) {
             loading.classList.remove('show'); btn.disabled = false;
-            msgEl.textContent = 'Error generating best leads. Make sure pipeline has been run through Tool 8.';
+            msgEl.textContent = 'Error generating best leads. Please try again in a moment.';
             msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.1)';
             msgEl.style.color = '#fca5a5'; msgEl.style.border = '1px solid rgba(239,68,68,0.3)';
         });

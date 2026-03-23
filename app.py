@@ -2285,6 +2285,7 @@ def download_audit(filename):
 
 @app.route("/status")
 @login_required
+@limiter.exempt
 def status():
     data = dict(job_status)
     remaining = SERPAPI_MONTHLY_LIMIT - api_usage["serpapi_calls"]
@@ -2305,6 +2306,7 @@ def status():
 
 @app.route("/api_usage")
 @login_required
+@limiter.exempt
 def api_usage_endpoint():
     remaining = SERPAPI_MONTHLY_LIMIT - api_usage["serpapi_calls"]
     return jsonify({
@@ -2585,6 +2587,7 @@ def download_smart():
 
 @app.route("/best_leads")
 @login_required
+@limiter.exempt
 def best_leads():
     """Generate Best Leads using dynamic toggle filters."""
     try:
@@ -3424,6 +3427,7 @@ def _bulk_send_emails(send_list):
 
 @app.route("/outreach/status")
 @login_required
+@limiter.exempt
 def outreach_status():
     return jsonify({
         "status": job_status.get("outreach", "idle"),
