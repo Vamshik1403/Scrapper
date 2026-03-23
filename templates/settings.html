@@ -226,6 +226,7 @@
             <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">Current: <span id="ak-website-current">loading...</span></div>
         </div>
     </div>
+<<<<<<< HEAD
 
     <!-- SMTP Settings -->
     <div style="border-top:1px solid var(--border); padding-top:16px; margin-top:16px;">
@@ -254,6 +255,9 @@
     </div>
 
     <p style="font-size:11px; color:var(--text-muted); margin:12px 0;">Leave a field empty to keep the current value. For multiple SerpApi keys, use commas: <code style="background:rgba(255,255,255,0.05); padding:2px 6px; border-radius:4px;">key1,key2,key3</code></p>
+=======
+    <p style="font-size:11px; color:var(--text-muted); margin-bottom:12px;">Leave a field empty to keep the current value. For multiple SerpApi keys, use commas: <code style="background:rgba(255,255,255,0.05); padding:2px 6px; border-radius:4px;">key1,key2,key3</code></p>
+>>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
     <div class="control-actions">
         <button class="btn btn-green" onclick="saveApiKeys()">Save API Keys</button>
     </div>
@@ -475,11 +479,14 @@ function showApikeyMsg(msg, isError) {
         if (d.openai_keys_count > 1) oaiEl.textContent += ' (' + d.openai_keys_count + ' keys)';
         document.getElementById('ak-email-current').textContent = d.your_email || '(not set)';
         document.getElementById('ak-website-current').textContent = d.your_website || '(not set)';
+<<<<<<< HEAD
         document.getElementById('ak-smtp-host-current').textContent = d.smtp_host || '(not set)';
         document.getElementById('ak-smtp-port-current').textContent = d.smtp_port || '587';
         var smtpStatus = document.getElementById('ak-smtp-status');
         if (d.smtp_configured) { smtpStatus.textContent = 'Configured'; smtpStatus.style.color = '#86efac'; }
         else { smtpStatus.textContent = 'Not configured'; smtpStatus.style.color = '#fca5a5'; }
+=======
+>>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
     }).catch(function(){});
 })();
 function saveApiKeys() {
@@ -487,10 +494,14 @@ function saveApiKeys() {
         serpapi_key: document.getElementById('ak-serpapi').value,
         openai_key: document.getElementById('ak-openai').value,
         your_email: document.getElementById('ak-email').value,
+<<<<<<< HEAD
         your_website: document.getElementById('ak-website').value,
         smtp_host: document.getElementById('ak-smtp-host').value,
         smtp_port: document.getElementById('ak-smtp-port').value,
         smtp_password: document.getElementById('ak-smtp-password').value
+=======
+        your_website: document.getElementById('ak-website').value
+>>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
     };
     fetch('/save_api_keys', {
         method: 'POST',
