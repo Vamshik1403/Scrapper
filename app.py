@@ -2628,50 +2628,12 @@ def best_leads():
             buf = io.BytesIO(filtered.to_csv(index=False).encode("utf-8"))
             return send_file(buf, as_attachment=True, download_name="best_leads.csv", mimetype="text/csv")
 
-        # Return JSON preview (top 20)
-        preview = filtered.head(20).to_dict(orient="records")
+        # Clean NaN → None so jsonify produces valid JSON (NaN is not valid JSON)
+        preview = json.loads(filtered.head(20).to_json(orient="records"))
         return jsonify({"status": "ok", "count": len(filtered), "total": len(df), "preview": preview})
     except Exception as e:
         logger.error("Best leads error: %s", e)
         return jsonify({"status": "error", "msg": f"Error generating best leads: {str(e)}", "count": 0})
-    if not _csv_exists(CALCULATED_CSV):
-        return jsonify({"status": "error", "msg": "No data found. Run through Tool 8 first.", "count": 0})
-
-    df = _load_df(CALCULATED_CSV)
-
-    # Read toggle params ("1" = enabled, default all on)
-    use_hot = request.args.get("hot", "1") == "1"
-    use_no_ads = request.args.get("no_ads", "1") == "1"
-    use_bad_site = request.args.get("bad_site", "1") == "1"
-    use_high_roi = request.args.get("high_roi", "1") == "1"
-    use_high_gap = request.args.get("high_gap", "1") == "1"
-    download = request.args.get("download", "0") == "1"
-
-    mask = pd.Series([True] * len(df), index=df.index)
-
-    if use_hot and "prospect_label" in df.columns:
-        mask &= df["prospect_label"] == "HOT"
-    if use_no_ads and "ads_running" in df.columns:
-        mask &= df["ads_running"] == "NO"
-    if use_bad_site and "website_quality" in df.columns:
-        mask &= df["website_quality"].isin(["BAD", "BASIC"])
-    if use_high_roi and "roi_multiple" in df.columns:
-        mask &= df["roi_multiple"] >= 30
-    if use_high_gap and "competitive_gap_score" in df.columns:
-        mask &= df["competitive_gap_score"] >= 7
-
-    filtered = df[mask]
-    _save_csv(BEST_LEADS_CSV, filtered)
-
-    if download:
-        if len(filtered) == 0:
-            return "No best leads found with current filters.", 404
-        buf = io.BytesIO(filtered.to_csv(index=False).encode("utf-8"))
-        return send_file(buf, as_attachment=True, download_name="best_leads.csv", mimetype="text/csv")
-
-    # Return JSON preview (top 20)
-    preview = filtered.head(20).to_dict(orient="records")
-    return jsonify({"status": "ok", "count": len(filtered), "total": len(df), "preview": preview})
 
 
 @app.route("/download/<tool>/<fmt>")
