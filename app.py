@@ -7,11 +7,8 @@ import hashlib
 import logging
 import threading
 import smtplib
-<<<<<<< HEAD
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
 from contextlib import nullcontext
 from datetime import datetime, timedelta
 from functools import wraps
@@ -34,11 +31,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from openai import OpenAI
 
-<<<<<<< HEAD
+
 from config import SERPAPI_KEY, OPENAI_KEY, SERPAPI_KEYS, OPENAI_KEYS, YOUR_EMAIL, YOUR_WEBSITE, SMTP_HOST, SMTP_PORT, SMTP_PASSWORD
-=======
-from config import SERPAPI_KEY, OPENAI_KEY, SERPAPI_KEYS, OPENAI_KEYS, YOUR_EMAIL, YOUR_WEBSITE
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
+
 
 app = Flask(__name__)
 
@@ -259,21 +254,18 @@ def _set_setting(key, value):
 def _load_keys_from_db():
     """On startup, override config values with any DB-stored keys."""
     global SERPAPI_KEYS, SERPAPI_KEY, OPENAI_KEYS, OPENAI_KEY, YOUR_EMAIL, YOUR_WEBSITE
-<<<<<<< HEAD
+
     global SMTP_HOST, SMTP_PORT, SMTP_PASSWORD
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
 
     db_serpapi = _get_setting("SERPAPI_KEY", "")
     db_openai = _get_setting("OPENAI_KEY", "")
     db_email = _get_setting("YOUR_EMAIL", "")
     db_website = _get_setting("YOUR_WEBSITE", "")
-<<<<<<< HEAD
+
     db_smtp_host = _get_setting("SMTP_HOST", "")
     db_smtp_port = _get_setting("SMTP_PORT", "")
     db_smtp_password = _get_setting("SMTP_PASSWORD", "")
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
+
 
     if db_serpapi:
         if "," in db_serpapi:
@@ -291,7 +283,7 @@ def _load_keys_from_db():
         YOUR_EMAIL = db_email
     if db_website:
         YOUR_WEBSITE = db_website
-<<<<<<< HEAD
+
     if db_smtp_host:
         SMTP_HOST = db_smtp_host
     if db_smtp_port:
@@ -301,8 +293,6 @@ def _load_keys_from_db():
             pass
     if db_smtp_password:
         SMTP_PASSWORD = db_smtp_password
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
 
 
 _load_keys_from_db()
@@ -455,10 +445,8 @@ job_status = {
     "tool1": "idle", "tool2": "idle", "tool3": "idle", "tool4": "idle", "tool5": "idle", "tool6": "idle", "tool7": "idle", "tool8": "idle", "tool9": "idle", "tool10": "idle",
     "tool1_msg": "", "tool2_msg": "", "tool3_msg": "", "tool4_msg": "", "tool5_msg": "", "tool6_msg": "", "tool7_msg": "", "tool8_msg": "", "tool9_msg": "", "tool10_msg": "",
     "pipeline": "idle", "pipeline_msg": "",
-<<<<<<< HEAD
     "outreach": "idle", "outreach_msg": "",
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
+
 }
 
 # Active service type for scraping (default: garage door repair)
@@ -1983,12 +1971,9 @@ def save_api_keys():
         "OPENAI_KEY": data.get("openai_key", "").strip(),
         "YOUR_EMAIL": data.get("your_email", "").strip(),
         "YOUR_WEBSITE": data.get("your_website", "").strip(),
-<<<<<<< HEAD
         "SMTP_HOST": data.get("smtp_host", "").strip(),
         "SMTP_PORT": data.get("smtp_port", "").strip(),
         "SMTP_PASSWORD": data.get("smtp_password", "").strip(),
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
     }
 
     updated = []
@@ -2034,10 +2019,7 @@ def save_api_keys():
 
     # Reload globals from DB
     global SERPAPI_KEYS, SERPAPI_KEY, OPENAI_KEYS, OPENAI_KEY, YOUR_EMAIL, YOUR_WEBSITE
-<<<<<<< HEAD
     global SMTP_HOST, SMTP_PORT, SMTP_PASSWORD
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
     global _serpapi_key_index, _serpapi_exhausted, _openai_key_index, _openai_exhausted
 
     _load_keys_from_db()
@@ -2070,12 +2052,9 @@ def get_api_keys():
         "openai_keys_count": len(OPENAI_KEYS),
         "your_email": YOUR_EMAIL,
         "your_website": YOUR_WEBSITE,
-<<<<<<< HEAD
         "smtp_host": SMTP_HOST,
         "smtp_port": SMTP_PORT,
         "smtp_configured": bool(SMTP_HOST and SMTP_PASSWORD),
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
     })
 
 
@@ -2608,7 +2587,6 @@ def download_smart():
 @login_required
 def best_leads():
     """Generate Best Leads using dynamic toggle filters."""
-<<<<<<< HEAD
     try:
         if not _csv_exists(CALCULATED_CSV):
             return jsonify({"status": "error", "msg": "No data found. Run through Tool 8 first.", "count": 0})
@@ -2653,7 +2631,6 @@ def best_leads():
     except Exception as e:
         logger.error("Best leads error: %s", e)
         return jsonify({"status": "error", "msg": f"Error generating best leads: {str(e)}", "count": 0})
-=======
     if not _csv_exists(CALCULATED_CSV):
         return jsonify({"status": "error", "msg": "No data found. Run through Tool 8 first.", "count": 0})
 
@@ -2692,7 +2669,6 @@ def best_leads():
     # Return JSON preview (top 20)
     preview = filtered.head(20).to_dict(orient="records")
     return jsonify({"status": "ok", "count": len(filtered), "total": len(df), "preview": preview})
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
 
 
 @app.route("/download/<tool>/<fmt>")
@@ -3302,8 +3278,6 @@ def backup_restore_server():
     except ValueError as e:
         return jsonify({"status": "error", "msg": str(e)}), 400
 
-
-<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Email Outreach — Send personalised emails via SMTP
 # ---------------------------------------------------------------------------
@@ -3504,9 +3478,6 @@ def outreach_preview():
         })
     return jsonify({"status": "ok", "leads": leads, "count": len(leads)})
 
-
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
 if __name__ == "__main__":
     # Set debug=False for production; use gunicorn in deployed environments
     app.run(debug=not IS_PRODUCTION, port=5000)
