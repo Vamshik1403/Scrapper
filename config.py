@@ -36,11 +36,8 @@ OPENAI_KEY = OPENAI_KEYS[0] if OPENAI_KEYS else ""
 
 YOUR_EMAIL = os.environ.get("YOUR_EMAIL", "your@email.com")
 YOUR_WEBSITE = os.environ.get("YOUR_WEBSITE", "yourwebsite.com")
-<<<<<<< HEAD
 
 # SMTP Configuration for outreach email sending
 SMTP_HOST = os.environ.get("SMTP_HOST", "")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
-=======
->>>>>>> 6e8ce73c20b0e60bcc8629f15554ad4469a134e1
